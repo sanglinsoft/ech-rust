@@ -1,0 +1,211 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-server:
+    name: Build server (${{ matrix.name }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-amd64
+            target: x86_64-unknown-linux-gnu
+            artifact: ech-grpc-server-linux-amd64
+            use_cross: false
+          - name: linux-arm64
+            target: aarch64-unknown-linux-gnu
+            artifact: ech-grpc-server-linux-arm64
+            use_cross: true
+          - name: freebsd-amd64
+            target: x86_64-unknown-freebsd
+            artifact: ech-grpc-server-freebsd-amd64
+            use_cross: true
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install protoc
+        if: ${{ !matrix.use_cross }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends protobuf-compiler
+
+      - name: Install cross
+        if: ${{ matrix.use_cross }}
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+
+      - name: Build with cargo
+        if: ${{ !matrix.use_cross }}
+        run: cargo build -p ech-grpc-server --release --target ${{ matrix.target }}
+
+      - name: Build with cross
+        if: ${{ matrix.use_cross }}
+        run: cross build -p ech-grpc-server --release --target ${{ matrix.target }}
+
+      - name: Package
+        run: |
+          mkdir -p dist/pkg
+          cp target/${{ matrix.target }}/release/ech-grpc-server dist/pkg/${{ matrix.artifact }}
+          chmod +x dist/pkg/${{ matrix.artifact }}
+          tar -C dist/pkg -czf dist/${{ matrix.artifact }}.tar.gz ${{ matrix.artifact }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/${{ matrix.artifact }}.tar.gz
+          if-no-files-found: error
+
+  build-client:
+    name: Build client (${{ matrix.name }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-amd64
+            target: x86_64-unknown-linux-gnu
+            artifact: ech-grpc-client-linux-amd64
+            package: tar
+          - name: windows-amd64
+            target: x86_64-pc-windows-gnu
+            artifact: ech-grpc-client-windows-amd64
+            package: zip
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install Linux build dependencies
+        if: ${{ matrix.target == 'x86_64-unknown-linux-gnu' }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends protobuf-compiler cmake nasm pkg-config
+
+      - name: Install Windows build dependencies
+        if: ${{ matrix.target == 'x86_64-pc-windows-gnu' }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends protobuf-compiler cmake nasm mingw-w64 zip
+
+      - name: Build Linux client
+        if: ${{ matrix.target == 'x86_64-unknown-linux-gnu' }}
+        run: cargo build -p ech-grpc-client --release --target ${{ matrix.target }}
+
+      - name: Build Windows client
+        if: ${{ matrix.target == 'x86_64-pc-windows-gnu' }}
+        env:
+          CMAKE_TOOLCHAIN_FILE: ${{ github.workspace }}/.cargo/boringssl-windows-gnu-toolchain.cmake
+        run: cargo build -p ech-grpc-client --release --target ${{ matrix.target }}
+
+      - name: Package Linux client
+        if: ${{ matrix.package == 'tar' }}
+        run: |
+          mkdir -p dist/pkg
+          cp target/${{ matrix.target }}/release/ech-grpc-client dist/pkg/${{ matrix.artifact }}
+          chmod +x dist/pkg/${{ matrix.artifact }}
+          tar -C dist/pkg -czf dist/${{ matrix.artifact }}.tar.gz ${{ matrix.artifact }}
+
+      - name: Package Windows client
+        if: ${{ matrix.package == 'zip' }}
+        run: |
+          mkdir -p dist/${{ matrix.artifact }}
+          cp target/${{ matrix.target }}/release/ech-grpc-client.exe dist/${{ matrix.artifact }}/
+          cp "$(find /usr/lib/gcc/x86_64-w64-mingw32 -path '*/libstdc++-6.dll' -print -quit)" dist/${{ matrix.artifact }}/
+          cp "$(find /usr/lib/gcc/x86_64-w64-mingw32 -path '*/libgcc_s_seh-1.dll' -print -quit)" dist/${{ matrix.artifact }}/
+          cp /usr/x86_64-w64-mingw32/lib/libwinpthread-1.dll dist/${{ matrix.artifact }}/
+          (cd dist && zip -r ${{ matrix.artifact }}.zip ${{ matrix.artifact }})
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            dist/${{ matrix.artifact }}.tar.gz
+            dist/${{ matrix.artifact }}.zip
+          if-no-files-found: error
+
+  docker-server:
+    name: Build and push server Docker image
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set image name
+        run: echo "IMAGE_NAME=ghcr.io/${GITHUB_REPOSITORY,,}/ech-grpc-server" >> "$GITHUB_ENV"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.server
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ env.IMAGE_NAME }}:${{ github.ref_name }}
+            ${{ env.IMAGE_NAME }}:latest
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ github.ref_name }}
+
+  publish-release:
+    name: Publish GitHub release
+    runs-on: ubuntu-24.04
+    needs:
+      - build-server
+      - build-client
+      - docker-server
+
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
