@@ -69,6 +69,20 @@ cargo run -p ech-grpc-server -- --config server/example.toml
 
 Set both `server.cert` and `server.key` to enable TLS. Clients must use a matching backend `auth_token`.
 
+`LISTEN` overrides `server.listen`, and `TOKENS` overrides `auth.tokens` with a comma-separated token list. Without `--config`, the server uses default policy values plus these environment overrides.
+
+Docker quick start:
+
+```bash
+docker run -d \
+  --name ech-grpc-server \
+  --restart unless-stopped \
+  -p 50051:50051 \
+  -e LISTEN=0.0.0.0:50051 \
+  -e TOKENS=change-me-backend-token \
+  ghcr.io/<owner>/<repo>/ech-grpc-server:latest
+```
+
 ## Client
 
 Example config: `client/example.toml`
@@ -85,12 +99,12 @@ password = "change-me-local-password"
 backend = "ech-yinl"
 
 [backends.ech-yinl]
-endpoint = "https://ech.yinl.de:443"
+endpoint = "https://ech.xxx.xx:443"
 auth_token = "change-me-backend-token"
 pool_size = 2
 max_streams_per_channel = 128
 ech = true
-ech_name = "ech.yinl.de"
+ech_name = "ech.xxx.xx"
 ech_bootstrap_doh = "https://dns.alidns.com/dns-query"
 ech_policy = "fallback_plain_tls"
 

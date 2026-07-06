@@ -11,6 +11,13 @@ This is the first server-side MVP for the design in `ECH_GRPC_RUST_DESIGN.md`.
 The example config starts a plaintext gRPC server on `127.0.0.1:50051`.
 Set `server.cert` and `server.key` to enable TLS.
 
+For Docker or other environment-driven deployments, omit `--config` and set:
+
+```bash
+LISTEN=0.0.0.0:50051
+TOKENS=change-me-backend-token
+```
+
 ## Authentication
 
 Clients must send backend token metadata:

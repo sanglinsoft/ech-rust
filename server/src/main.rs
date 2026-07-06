@@ -20,8 +20,8 @@ use crate::{
 #[derive(Debug, Parser)]
 #[command(name = "ech-grpc-server")]
 struct Args {
-    #[arg(short, long, default_value = "server/example.toml")]
-    config: PathBuf,
+    #[arg(short, long)]
+    config: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -31,7 +31,7 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let args = Args::parse();
-    let config = Config::load(&args.config).await?;
+    let config = Config::load(args.config.as_deref()).await?;
     let listen: SocketAddr = config
         .server
         .listen

@@ -1,11 +1,3 @@
-[target.aarch64-unknown-linux-gnu]
-pre-build = [
-  "apt-get update",
-  "apt-get install -y --no-install-recommends protobuf-compiler",
-]
-
-[target.x86_64-unknown-freebsd]
-pre-build = [
-  "apt-get update",
-  "apt-get install -y --no-install-recommends protobuf-compiler",
-]
+# Build scripts use protoc-bin-vendored, so cross images do not need a
+# distro-provided protobuf-compiler. Some cross images ship an old protoc that
+# cannot parse proto3 files.
