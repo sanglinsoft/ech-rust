@@ -216,15 +216,20 @@ backend = "cf-edge-a"
 password_hash = "$argon2id$..."
 backend = "vps-b"
 
+[ech]
+bootstrap_doh = "https://dns.alidns.com/dns-query"
+policy = "strict"
+
 [backends.cf-edge-a]
 endpoint = "https://grpc.example.com:443"
+# Optional TCP dial override. The endpoint host is still used for gRPC
+# authority; connect_addr only changes where the TCP socket is opened.
+# Set tls_domain only if TLS/ECH should use a different name.
+# connect_addr = "104.21.61.43:443"
 ech = true
-ech_name = "grpc.example.com"
-ech_bootstrap_doh = "https://dns.alidns.com/dns-query"
 auth_token = "change-me-backend-token-a"
 pool_size = 4
 max_streams_per_channel = 128
-ech_policy = "strict"
 
 [backends.vps-b]
 endpoint = "https://vps.example.net:443"
@@ -350,8 +355,8 @@ Responsibilities:
 - Query HTTPS/SVCB DNS records for the backend ECH name.
 - Extract the `ech` HTTPS/SVCB parameter, decode it into an ECHConfig, and cache it according to DNS TTL.
 - Build an ECH-capable TLS connector.
-- Fail closed when `ech_policy = "strict"`.
-- Optionally fall back to ordinary TLS when `ech_policy = "fallback_plain_tls"`.
+- Fail closed when global `[ech].policy = "strict"`.
+- Optionally fall back to ordinary TLS when global `[ech].policy = "fallback_plain_tls"`.
 
 Suggested abstraction:
 

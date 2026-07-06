@@ -80,7 +80,7 @@ async fn run(path: PathBuf) -> anyhow::Result<()> {
     let config = Config::load(&path).await?;
     let auth = AuthStore::from_config(config.users.clone())?;
     let china_ip = ChinaIpSet::load(&config.route).await?;
-    let pools = PoolRegistry::connect(config.backends.clone()).await?;
+    let pools = PoolRegistry::connect(config.backends.clone(), config.ech.clone()).await?;
     let router = Arc::new(Router::new(config.route.clone(), china_ip, pools));
 
     validate_users_backends(&config)?;
@@ -119,7 +119,7 @@ async fn test_backend(path: PathBuf, backend_id: String) -> anyhow::Result<()> {
         .get(&backend_id)
         .with_context(|| format!("backend {backend_id} not found"))?
         .clone();
-    let channel = ech_tls::connect_channel(&backend).await?;
+    let channel = ech_tls::connect_channel(&backend, &config.ech).await?;
     drop(channel);
     info!(backend = %backend_id, "backend connection succeeded");
     Ok(())

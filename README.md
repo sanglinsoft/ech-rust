@@ -14,7 +14,7 @@ The current repository contains a working MVP:
 - TLS backend transport for `https://` endpoints.
 - ECH HTTPS/SVCB bootstrap over DoH and BoringSSL ECH TLS transport.
 
-For ordinary TLS, the client uses tonic's default rustls transport. When `ech = true`, the client bootstraps ECHConfigList from HTTPS/SVCB records over DoH, performs the backend TLS handshake with BoringSSL, verifies `h2` ALPN, checks that ECH was accepted, and then hands the encrypted HTTP/2 stream to tonic through a custom connector. If `ech_policy = "strict"`, any bootstrap or ECH handshake failure fails closed. If `ech_policy = "fallback_plain_tls"`, the client falls back to ordinary TLS after an ECH failure.
+For ordinary TLS, the client uses tonic's default rustls transport. When `ech = true`, the client bootstraps ECHConfigList from HTTPS/SVCB records over the global `[ech].bootstrap_doh`, performs the backend TLS handshake with BoringSSL, verifies `h2` ALPN, checks that ECH was accepted, and then hands the encrypted HTTP/2 stream to tonic through a custom connector. If `[ech].policy = "strict"`, any bootstrap or ECH handshake failure fails closed. If `[ech].policy = "fallback_plain_tls"`, the client falls back to ordinary TLS after an ECH failure. Per-backend `ech_bootstrap_doh` and `ech_policy` are still accepted as compatibility overrides.
 
 ## Repository Layout
 
@@ -94,19 +94,24 @@ http = "127.0.0.1:8080"
 socks5_allow_no_auth = true
 socks5_default_user = "alice"
 
+[ech]
+bootstrap_doh = "https://dns.alidns.com/dns-query"
+policy = "strict"
+
 [users.alice]
 password = "change-me-local-password"
 backend = "ech-yinl"
 
 [backends.ech-yinl]
 endpoint = "https://ech.xxx.xx:443"
+# Optional TCP dial override for ECH backends. Keep endpoint as the real
+# gRPC authority/TLS host, and use connect_addr only to bypass DNS.
+# Set tls_domain only if TLS/ECH should use a different name.
+# connect_addr = "104.21.61.43:443"
 auth_token = "change-me-backend-token"
 pool_size = 2
 max_streams_per_channel = 128
 ech = true
-ech_name = "ech.xxx.xx"
-ech_bootstrap_doh = "https://dns.alidns.com/dns-query"
-ech_policy = "fallback_plain_tls"
 
 [route]
 china_ip_direct = true

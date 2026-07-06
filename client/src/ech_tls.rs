@@ -2,29 +2,28 @@ use anyhow::{bail, Context};
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint};
 use tracing::{info, warn};
 
-use crate::{config::BackendConfig, ech_connector::EchConnector};
+use crate::{
+    config::{BackendConfig, EchConfig},
+    ech_connector::EchConnector,
+};
 
-pub async fn connect_channel(backend: &BackendConfig) -> anyhow::Result<Channel> {
+pub async fn connect_channel(backend: &BackendConfig, ech: &EchConfig) -> anyhow::Result<Channel> {
     if backend.ech {
-        let ech_config = bootstrap_ech_config(backend).await;
-        match (&backend.ech_policy[..], ech_config) {
+        let ech_name = backend_tls_name(backend)?;
+        let ech_config = bootstrap_ech_config(backend, ech).await;
+        match (backend.effective_ech_policy(ech), ech_config) {
             ("strict", Ok(config)) => return connect_ech_channel(backend, config).await,
-            ("strict", Err(err)) => {
-                bail!(
-                    "strict ECH bootstrap failed for {:?}: {err}",
-                    backend.ech_name
-                )
-            }
+            ("strict", Err(err)) => bail!("strict ECH bootstrap failed for {ech_name}: {err}"),
             (_, Ok(config)) => match connect_ech_channel(backend, config).await {
                 Ok(channel) => return Ok(channel),
                 Err(err) => warn!(
-                    ech_name = ?backend.ech_name,
+                    ech_name = %ech_name,
                     error = %err,
                     "ECH transport failed; falling back to ordinary TLS"
                 ),
             },
             (_, Err(err)) => warn!(
-                ech_name = ?backend.ech_name,
+                ech_name = %ech_name,
                 error = %err,
                 "ECH bootstrap failed; falling back to ordinary TLS"
             ),
@@ -40,9 +39,7 @@ pub async fn connect_channel(backend: &BackendConfig) -> anyhow::Result<Channel>
 
     if backend.endpoint.starts_with("https://") {
         let mut tls = ClientTlsConfig::new();
-        if let Some(domain) = backend.tls_domain.as_ref().or(backend.ech_name.as_ref()) {
-            tls = tls.domain_name(domain.clone());
-        }
+        tls = tls.domain_name(backend_tls_name(backend)?);
         if let Some(path) = &backend.ca_cert {
             let pem = tokio::fs::read(path)
                 .await
@@ -88,17 +85,11 @@ async fn connect_ech_channel(
         .with_context(|| format!("failed to connect ECH backend {}", backend.endpoint))
 }
 
-async fn bootstrap_ech_config(backend: &BackendConfig) -> anyhow::Result<Vec<u8>> {
-    let name = backend
-        .ech_name
-        .as_deref()
-        .context("ech_name is required when ech = true")?;
-    let doh = backend
-        .ech_bootstrap_doh
-        .as_deref()
-        .context("ech_bootstrap_doh is required when ech = true")?;
+async fn bootstrap_ech_config(backend: &BackendConfig, ech: &EchConfig) -> anyhow::Result<Vec<u8>> {
+    let name = backend_tls_name(backend)?;
+    let doh = backend.effective_ech_bootstrap_doh(ech);
 
-    let query = build_https_query(name)?;
+    let query = build_https_query(&name)?;
     let response = reqwest::Client::new()
         .post(doh)
         .header("content-type", "application/dns-message")
@@ -117,6 +108,24 @@ async fn bootstrap_ech_config(backend: &BackendConfig) -> anyhow::Result<Vec<u8>
         .context("failed to parse HTTPS/SVCB response for ECHConfigList")?;
     info!(ech_name = %name, ech_config_len = ech.len(), "bootstrapped ECHConfigList");
     Ok(ech)
+}
+
+pub fn backend_tls_name(backend: &BackendConfig) -> anyhow::Result<String> {
+    if let Some(name) = backend
+        .tls_domain
+        .as_deref()
+        .or(backend.ech_name.as_deref())
+    {
+        return Ok(name.to_owned());
+    }
+
+    let uri = backend
+        .endpoint
+        .parse::<http::Uri>()
+        .with_context(|| format!("invalid backend endpoint {}", backend.endpoint))?;
+    uri.host()
+        .map(ToOwned::to_owned)
+        .context("backend endpoint must include a host")
 }
 
 fn build_https_query(name: &str) -> anyhow::Result<Vec<u8>> {

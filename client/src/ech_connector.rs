@@ -16,7 +16,7 @@ use tokio_boring::SslStream;
 use tower_service::Service;
 use tracing::info;
 
-use crate::config::BackendConfig;
+use crate::{config::BackendConfig, ech_tls::backend_tls_name};
 
 #[derive(Clone)]
 pub struct EchConnector {
@@ -40,20 +40,19 @@ impl EchConnector {
             bail!("ECH transport requires an https backend endpoint");
         }
 
-        let host = uri
+        let endpoint_host = uri
             .host()
             .context("backend endpoint must include a host")?
             .to_owned();
         let port = uri.port_u16().unwrap_or(443);
-        let sni_name = backend
-            .tls_domain
-            .as_ref()
-            .or(backend.ech_name.as_ref())
-            .cloned()
-            .unwrap_or_else(|| host.clone());
+        let sni_name = backend_tls_name(backend)?;
+        let connect_addr = backend
+            .connect_addr
+            .clone()
+            .unwrap_or_else(|| format!("{endpoint_host}:{port}"));
 
         Ok(Self {
-            connect_addr: format!("{host}:{port}"),
+            connect_addr,
             sni_name,
             ech_config_list,
             ca_cert: backend.ca_cert.clone(),

@@ -12,6 +12,8 @@ pub struct Config {
     #[serde(default)]
     pub backends: HashMap<String, BackendConfig>,
     #[serde(default)]
+    pub ech: EchConfig,
+    #[serde(default)]
     pub route: RouteConfig,
 }
 
@@ -36,21 +38,31 @@ pub struct UserConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub struct BackendConfig {
     pub endpoint: String,
+    pub connect_addr: Option<String>,
     pub auth_token: String,
     #[serde(default)]
     pub ech: bool,
     pub ech_name: Option<String>,
+    #[serde(default)]
     pub ech_bootstrap_doh: Option<String>,
     #[serde(default = "default_pool_size")]
     pub pool_size: usize,
     #[serde(default = "default_max_streams_per_channel")]
     pub max_streams_per_channel: usize,
-    #[serde(default = "default_ech_policy")]
-    pub ech_policy: String,
+    #[serde(default)]
+    pub ech_policy: Option<String>,
     pub tls_domain: Option<String>,
     pub ca_cert: Option<std::path::PathBuf>,
     #[serde(default = "default_connect_timeout_ms")]
     pub connect_timeout_ms: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct EchConfig {
+    #[serde(default = "default_ech_bootstrap_doh")]
+    pub bootstrap_doh: String,
+    #[serde(default = "default_ech_policy")]
+    pub policy: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -92,9 +104,28 @@ impl Default for RouteConfig {
     }
 }
 
+impl Default for EchConfig {
+    fn default() -> Self {
+        Self {
+            bootstrap_doh: default_ech_bootstrap_doh(),
+            policy: default_ech_policy(),
+        }
+    }
+}
+
 impl BackendConfig {
     pub fn connect_timeout(&self) -> Duration {
         Duration::from_millis(self.connect_timeout_ms)
+    }
+
+    pub fn effective_ech_bootstrap_doh<'a>(&'a self, ech: &'a EchConfig) -> &'a str {
+        self.ech_bootstrap_doh
+            .as_deref()
+            .unwrap_or(&ech.bootstrap_doh)
+    }
+
+    pub fn effective_ech_policy<'a>(&'a self, ech: &'a EchConfig) -> &'a str {
+        self.ech_policy.as_deref().unwrap_or(&ech.policy)
     }
 }
 
@@ -114,8 +145,12 @@ fn default_max_streams_per_channel() -> usize {
     128
 }
 
+fn default_ech_bootstrap_doh() -> String {
+    "https://dns.alidns.com/dns-query".to_owned()
+}
+
 fn default_ech_policy() -> String {
-    "fallback_plain_tls".to_owned()
+    "strict".to_owned()
 }
 
 fn default_connect_timeout_ms() -> u64 {

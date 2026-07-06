@@ -202,6 +202,7 @@ jobs:
         uses: actions/download-artifact@v7
         with:
           path: dist
+          pattern: ech-grpc-*
           merge-multiple: true
 
       - name: Publish release

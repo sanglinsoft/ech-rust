@@ -10,7 +10,10 @@ use anyhow::{bail, Context};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tonic::transport::Channel;
 
-use crate::{config::BackendConfig, ech_tls};
+use crate::{
+    config::{BackendConfig, EchConfig},
+    ech_tls,
+};
 
 #[derive(Debug)]
 pub struct BackendPool {
@@ -26,14 +29,17 @@ pub struct PoolRegistry {
 }
 
 impl PoolRegistry {
-    pub async fn connect(backends: HashMap<String, BackendConfig>) -> anyhow::Result<Self> {
+    pub async fn connect(
+        backends: HashMap<String, BackendConfig>,
+        ech: EchConfig,
+    ) -> anyhow::Result<Self> {
         if backends.is_empty() {
             bail!("backends must contain at least one backend");
         }
 
         let mut pools = HashMap::with_capacity(backends.len());
         for (id, backend) in backends {
-            let pool = BackendPool::connect(backend.clone())
+            let pool = BackendPool::connect(backend.clone(), &ech)
                 .await
                 .with_context(|| format!("failed to initialize backend {id}"))?;
             pools.insert(id, Arc::new(pool));
@@ -50,11 +56,11 @@ impl PoolRegistry {
 }
 
 impl BackendPool {
-    async fn connect(backend: BackendConfig) -> anyhow::Result<Self> {
+    async fn connect(backend: BackendConfig, ech: &EchConfig) -> anyhow::Result<Self> {
         let pool_size = backend.pool_size.max(1);
         let mut channels = Vec::with_capacity(pool_size);
         for _ in 0..pool_size {
-            channels.push(ech_tls::connect_channel(&backend).await?);
+            channels.push(ech_tls::connect_channel(&backend, ech).await?);
         }
 
         Ok(Self {
