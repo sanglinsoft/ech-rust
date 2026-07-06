@@ -358,6 +358,7 @@ dependencies = [
  "prost",
  "protoc-bin-vendored",
  "reqwest",
+ "rustls-native-certs",
  "serde",
  "thiserror",
  "tokio",

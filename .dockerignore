@@ -4,6 +4,8 @@
 /.agents/
 /.codex/
 /dist/
+/core.*
+/client/local.toml
 
 *.local.toml
 *.pem

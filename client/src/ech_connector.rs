@@ -7,6 +7,7 @@ use std::{
 
 use anyhow::{bail, Context as _};
 use boring::ssl::{SslConnector, SslMethod, SslVerifyMode};
+use boring::x509::X509;
 use http::Uri;
 use tokio::{
     io::{AsyncRead, AsyncWrite, ReadBuf},
@@ -69,6 +70,7 @@ impl EchConnector {
         builder
             .set_default_verify_paths()
             .context("failed to load default certificate roots")?;
+        load_native_roots(&mut builder).context("failed to load native certificate roots")?;
         builder.set_verify(SslVerifyMode::PEER);
         builder
             .set_alpn_protos(b"\x02h2")
@@ -112,6 +114,24 @@ impl EchConnector {
         info!(sni = %self.sni_name, "BoringSSL ECH handshake accepted");
         Ok(EchTlsStream { inner: stream })
     }
+}
+
+fn load_native_roots(builder: &mut boring::ssl::SslConnectorBuilder) -> anyhow::Result<()> {
+    let certs = rustls_native_certs::load_native_certs()?;
+    let mut loaded = 0usize;
+    for cert in certs {
+        let cert =
+            X509::from_der(cert.as_ref()).context("failed to parse native root certificate")?;
+        if builder.cert_store_mut().add_cert(&cert).is_ok() {
+            loaded += 1;
+        }
+    }
+
+    if loaded == 0 {
+        bail!("native certificate store did not provide any usable roots");
+    }
+
+    Ok(())
 }
 
 impl Service<Uri> for EchConnector {
