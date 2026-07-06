@@ -1,0 +1,53 @@
+syntax = "proto3";
+
+package tunnel.v1;
+
+service TunnelService {
+  rpc Tunnel(stream ClientFrame) returns (stream ServerFrame);
+}
+
+message ClientFrame {
+  oneof payload {
+    Open open = 2;
+    bytes data = 3;
+    HalfClose half_close = 4;
+    Reset reset = 5;
+    Ping ping = 6;
+  }
+}
+
+message ServerFrame {
+  oneof payload {
+    OpenResult open_result = 2;
+    bytes data = 3;
+    HalfClose half_close = 4;
+    Reset reset = 5;
+    Pong pong = 6;
+  }
+}
+
+message Open {
+  string target_host = 1;
+  uint32 target_port = 2;
+  bytes first_payload = 3;
+}
+
+message OpenResult {
+  bool ok = 1;
+  string error = 2;
+}
+
+message HalfClose {}
+
+message Reset {
+  string reason = 1;
+}
+
+message Ping {
+  int64 unix_millis = 1;
+}
+
+message Pong {
+  int64 unix_millis = 1;
+}
+

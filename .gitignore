@@ -1,0 +1,32 @@
+# Rust build outputs
+/target/
+
+# Local release bundles
+/dist/
+
+# Local/editor state
+/.agents/
+/.codex/
+.DS_Store
+Thumbs.db
+
+# Runtime logs and dumps
+*.log
+*.pid
+*.stackdump
+
+# Local secrets and machine-specific config
+*.local.toml
+client/local.toml
+server/local.toml
+*.pem
+*.key
+*.crt
+*.pfx
+*.p12
+
+# Windows build/runtime artifacts
+*.exe
+*.dll
+*.pdb
+
