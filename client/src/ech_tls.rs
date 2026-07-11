@@ -1,3 +1,9 @@
+use std::{
+    collections::HashMap,
+    sync::{Mutex, OnceLock},
+    time::{Duration, Instant},
+};
+
 use anyhow::{bail, Context};
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint};
 use tracing::{info, warn};
@@ -6,6 +12,16 @@ use crate::{
     config::{BackendConfig, EchConfig},
     ech_connector::EchConnector,
 };
+
+const DEFAULT_ECH_CACHE_TTL: Duration = Duration::from_secs(300);
+const MIN_ECH_CACHE_TTL: Duration = Duration::from_secs(30);
+const MAX_ECH_CACHE_TTL: Duration = Duration::from_secs(3600);
+
+#[derive(Clone)]
+struct CachedEchConfig {
+    config: Vec<u8>,
+    expires_at: Instant,
+}
 
 pub async fn connect_channel(backend: &BackendConfig, ech: &EchConfig) -> anyhow::Result<Channel> {
     if backend.ech {
@@ -87,11 +103,21 @@ async fn connect_ech_channel(
 
 async fn bootstrap_ech_config(backend: &BackendConfig, ech: &EchConfig) -> anyhow::Result<Vec<u8>> {
     let name = backend_tls_name(backend)?;
-    let doh = backend.effective_ech_bootstrap_doh(ech);
+    let doh = backend.effective_ech_bootstrap_doh(ech).to_owned();
+    let cache_key = format!("{doh}\0{name}");
+
+    if let Some(cached) = get_cached_ech_config(&cache_key) {
+        info!(
+            ech_name = %name,
+            ech_config_len = cached.len(),
+            "using cached ECHConfigList"
+        );
+        return Ok(cached);
+    }
 
     let query = build_https_query(&name)?;
-    let response = reqwest::Client::new()
-        .post(doh)
+    let response = doh_client()
+        .post(&doh)
         .header("content-type", "application/dns-message")
         .header("accept", "application/dns-message")
         .body(query)
@@ -104,10 +130,62 @@ async fn bootstrap_ech_config(backend: &BackendConfig, ech: &EchConfig) -> anyho
         .await
         .context("failed to read ECH DoH response body")?;
 
-    let ech = parse_https_response_for_ech(&response)
+    let (ech_config, ttl) = parse_https_response_for_ech(&response)
         .context("failed to parse HTTPS/SVCB response for ECHConfigList")?;
-    info!(ech_name = %name, ech_config_len = ech.len(), "bootstrapped ECHConfigList");
-    Ok(ech)
+    put_cached_ech_config(cache_key, ech_config.clone(), ttl);
+    info!(
+        ech_name = %name,
+        ech_config_len = ech_config.len(),
+        ttl_secs = ttl.as_secs(),
+        "bootstrapped ECHConfigList"
+    );
+    Ok(ech_config)
+}
+
+fn doh_client() -> reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .timeout(Duration::from_secs(10))
+                .pool_max_idle_per_host(2)
+                .build()
+                .expect("failed to build DoH HTTP client")
+        })
+        .clone()
+}
+
+fn ech_config_cache() -> &'static Mutex<HashMap<String, CachedEchConfig>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, CachedEchConfig>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn get_cached_ech_config(key: &str) -> Option<Vec<u8>> {
+    let mut cache = ech_config_cache()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let now = Instant::now();
+    if let Some(entry) = cache.get(key) {
+        if entry.expires_at > now {
+            return Some(entry.config.clone());
+        }
+    }
+    cache.remove(key);
+    None
+}
+
+fn put_cached_ech_config(key: String, config: Vec<u8>, ttl: Duration) {
+    let ttl = ttl.clamp(MIN_ECH_CACHE_TTL, MAX_ECH_CACHE_TTL);
+    let mut cache = ech_config_cache()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    cache.insert(
+        key,
+        CachedEchConfig {
+            config,
+            expires_at: Instant::now() + ttl,
+        },
+    );
 }
 
 pub fn backend_tls_name(backend: &BackendConfig) -> anyhow::Result<String> {
@@ -154,7 +232,7 @@ fn build_https_query(name: &str) -> anyhow::Result<Vec<u8>> {
     Ok(out)
 }
 
-fn parse_https_response_for_ech(message: &[u8]) -> anyhow::Result<Vec<u8>> {
+fn parse_https_response_for_ech(message: &[u8]) -> anyhow::Result<(Vec<u8>, Duration)> {
     if message.len() < 12 {
         bail!("DNS response is too short");
     }
@@ -180,7 +258,7 @@ fn parse_https_response_for_ech(message: &[u8]) -> anyhow::Result<Vec<u8>> {
         skip_name(message, &mut offset)?;
         let rr_type = read_u16_at(message, &mut offset)?;
         let _class = read_u16_at(message, &mut offset)?;
-        let _ttl = read_u32_at(message, &mut offset)?;
+        let ttl = read_u32_at(message, &mut offset)?;
         let rdlen = read_u16_at(message, &mut offset)? as usize;
         let rdata_start = offset;
         let rdata_end = offset
@@ -192,7 +270,12 @@ fn parse_https_response_for_ech(message: &[u8]) -> anyhow::Result<Vec<u8>> {
 
         if rr_type == 65 {
             if let Some(ech) = parse_https_rdata_for_ech(message, rdata_start, rdata_end)? {
-                return Ok(ech);
+                let ttl = if ttl == 0 {
+                    DEFAULT_ECH_CACHE_TTL
+                } else {
+                    Duration::from_secs(u64::from(ttl))
+                };
+                return Ok((ech, ttl));
             }
         }
 

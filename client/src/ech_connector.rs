@@ -1,7 +1,10 @@
 use std::{
+    collections::HashMap,
     future::Future,
     io,
+    path::PathBuf,
     pin::Pin,
+    sync::{Mutex, OnceLock},
     task::{Context, Poll},
 };
 
@@ -17,14 +20,14 @@ use tokio_boring::SslStream;
 use tower_service::Service;
 use tracing::info;
 
-use crate::{config::BackendConfig, ech_tls::backend_tls_name};
+use crate::{config::BackendConfig, ech_tls::backend_tls_name, tcp_util::configure_proxy_tcp};
 
 #[derive(Clone)]
 pub struct EchConnector {
     connect_addr: String,
     sni_name: String,
     ech_config_list: Vec<u8>,
-    ca_cert: Option<std::path::PathBuf>,
+    ssl_connector: SslConnector,
 }
 
 pub struct EchTlsStream {
@@ -51,12 +54,13 @@ impl EchConnector {
             .connect_addr
             .clone()
             .unwrap_or_else(|| format!("{endpoint_host}:{port}"));
+        let ssl_connector = cached_ssl_connector(backend.ca_cert.clone())?;
 
         Ok(Self {
             connect_addr,
             sni_name,
             ech_config_list,
-            ca_cert: backend.ca_cert.clone(),
+            ssl_connector,
         })
     }
 
@@ -64,25 +68,10 @@ impl EchConnector {
         let tcp = TcpStream::connect(&self.connect_addr)
             .await
             .with_context(|| format!("failed to connect {}", self.connect_addr))?;
+        configure_proxy_tcp(&tcp);
 
-        let mut builder = SslConnector::builder(SslMethod::tls())
-            .context("failed to create BoringSSL connector")?;
-        builder
-            .set_default_verify_paths()
-            .context("failed to load default certificate roots")?;
-        load_native_roots(&mut builder).context("failed to load native certificate roots")?;
-        builder.set_verify(SslVerifyMode::PEER);
-        builder
-            .set_alpn_protos(b"\x02h2")
-            .context("failed to configure h2 ALPN")?;
-        if let Some(path) = &self.ca_cert {
-            builder
-                .set_ca_file(path)
-                .with_context(|| format!("failed to load CA certificate {}", path.display()))?;
-        }
-
-        let mut config = builder
-            .build()
+        let mut config = self
+            .ssl_connector
             .configure()
             .context("failed to configure BoringSSL connector")?;
         config.set_verify_hostname(true);
@@ -114,6 +103,48 @@ impl EchConnector {
         info!(sni = %self.sni_name, "BoringSSL ECH handshake accepted");
         Ok(EchTlsStream { inner: stream })
     }
+}
+
+fn cached_ssl_connector(ca_cert: Option<PathBuf>) -> anyhow::Result<SslConnector> {
+    static CACHE: OnceLock<Mutex<HashMap<Option<PathBuf>, SslConnector>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+
+    {
+        let guard = cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(connector) = guard.get(&ca_cert) {
+            return Ok(connector.clone());
+        }
+    }
+
+    let connector = build_ssl_connector(ca_cert.as_ref())?;
+    let mut guard = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    Ok(guard
+        .entry(ca_cert)
+        .or_insert_with(|| connector.clone())
+        .clone())
+}
+
+fn build_ssl_connector(ca_cert: Option<&PathBuf>) -> anyhow::Result<SslConnector> {
+    let mut builder =
+        SslConnector::builder(SslMethod::tls()).context("failed to create BoringSSL connector")?;
+    builder
+        .set_default_verify_paths()
+        .context("failed to load default certificate roots")?;
+    load_native_roots(&mut builder).context("failed to load native certificate roots")?;
+    builder.set_verify(SslVerifyMode::PEER);
+    builder
+        .set_alpn_protos(b"\x02h2")
+        .context("failed to configure h2 ALPN")?;
+    if let Some(path) = ca_cert {
+        builder
+            .set_ca_file(path)
+            .with_context(|| format!("failed to load CA certificate {}", path.display()))?;
+    }
+    Ok(builder.build())
 }
 
 fn load_native_roots(builder: &mut boring::ssl::SslConnectorBuilder) -> anyhow::Result<()> {

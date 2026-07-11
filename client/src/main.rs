@@ -8,6 +8,7 @@ mod ingress_http;
 mod ingress_socks5;
 mod proto;
 mod router;
+mod tcp_util;
 mod tunnel;
 
 use std::{path::PathBuf, sync::Arc};

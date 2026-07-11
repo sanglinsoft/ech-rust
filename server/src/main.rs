@@ -3,6 +3,7 @@ mod config;
 mod policy;
 mod proto;
 mod service;
+mod tcp_util;
 
 use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 

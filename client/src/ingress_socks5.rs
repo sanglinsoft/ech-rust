@@ -59,6 +59,7 @@ async fn handle(
     router: Arc<Router>,
     options: Socks5Options,
 ) -> anyhow::Result<()> {
+    crate::tcp_util::configure_proxy_tcp(&stream);
     let method = negotiate_auth(&mut stream, &options).await?;
     let user = authenticate(&mut stream, auth, method, &options).await?;
     let (host, port) = read_connect_request(&mut stream).await?;

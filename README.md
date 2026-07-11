@@ -24,6 +24,7 @@ server/                 Rust gRPC relay server
 proto/tunnel/v1/        Shared tunnel protocol
 chn_ip.txt              China IPv4 table, currently IP ranges
 chn_ip_v6.txt           China IPv6 table, currently IP ranges
+dist/                   Local packaging output (not committed)
 ECH_GRPC_RUST_DESIGN.md Design document
 ```
 
@@ -33,12 +34,61 @@ ECH_GRPC_RUST_DESIGN.md Design document
 cargo build --workspace
 ```
 
+Release builds:
+
+```bash
+# Linux server (native amd64)
+cargo build -p ech-grpc-server --release --target x86_64-unknown-linux-gnu
+
+# Windows client (MinGW cross-compile from Linux)
+# Requires: mingw-w64, cmake, nasm, zip
+CMAKE_TOOLCHAIN_FILE="$PWD/.cargo/boringssl-windows-gnu-toolchain.cmake" \
+  cargo build -p ech-grpc-client --release --target x86_64-pc-windows-gnu
+```
+
 Check and format:
 
 ```bash
 cargo fmt --all --check
 cargo check --workspace
 ```
+
+## Packaging
+
+After the release builds above, package artifacts into `dist/`:
+
+```bash
+mkdir -p dist/pkg dist/ech-grpc-client-windows-amd64
+
+# Linux server tarball
+cp target/x86_64-unknown-linux-gnu/release/ech-grpc-server \
+  dist/pkg/ech-grpc-server-linux-amd64
+chmod +x dist/pkg/ech-grpc-server-linux-amd64
+tar -C dist/pkg -czf dist/ech-grpc-server-linux-amd64.tar.gz \
+  ech-grpc-server-linux-amd64
+
+# Windows client zip (include MinGW runtime DLLs)
+cp target/x86_64-pc-windows-gnu/release/ech-grpc-client.exe \
+  dist/ech-grpc-client-windows-amd64/
+cp "$(find /usr/lib/gcc/x86_64-w64-mingw32 -path '*/libstdc++-6.dll' -print -quit)" \
+  dist/ech-grpc-client-windows-amd64/
+cp "$(find /usr/lib/gcc/x86_64-w64-mingw32 -path '*/libgcc_s_seh-1.dll' -print -quit)" \
+  dist/ech-grpc-client-windows-amd64/
+cp /usr/x86_64-w64-mingw32/lib/libwinpthread-1.dll \
+  dist/ech-grpc-client-windows-amd64/
+(cd dist && zip -r ech-grpc-client-windows-amd64.zip ech-grpc-client-windows-amd64)
+```
+
+Expected outputs:
+
+| Artifact | Path |
+|----------|------|
+| Windows client | `dist/ech-grpc-client-windows-amd64.zip` |
+| Linux server | `dist/ech-grpc-server-linux-amd64.tar.gz` |
+
+Tagged releases (`v*`) are also built by `.github/workflows/release.yml` for additional targets (server arm64/freebsd, client linux amd64, Docker image).
+
+Windows MinGW cross builds force `OPENSSL_NO_ASM` via `.cargo/boringssl-windows-gnu-toolchain.cmake` so BoringSSL does not require ADX/NASM objects that fail to link under MinGW.
 
 ## Server
 
@@ -65,6 +115,13 @@ Run:
 
 ```bash
 cargo run -p ech-grpc-server -- --config server/example.toml
+```
+
+Or from a packaged binary:
+
+```bash
+tar -xzf ech-grpc-server-linux-amd64.tar.gz
+./ech-grpc-server-linux-amd64 --config server/example.toml
 ```
 
 Set both `server.cert` and `server.key` to enable TLS. Clients must use a matching backend `auth_token`.
@@ -126,6 +183,12 @@ Run:
 cargo run -p ech-grpc-client -- run --config client/example.toml
 ```
 
+Windows packaged binary:
+
+```text
+ech-grpc-client.exe run --config client\example.toml
+```
+
 Test backend connectivity:
 
 ```bash
@@ -169,6 +232,18 @@ The client routes each local connection as follows:
 5. Otherwise proxy through the selected gRPC backend.
 
 Default `domain_strategy = "remote_for_proxy"` avoids local DNS resolution for proxied domain targets.
+
+China IP tables are loaded at startup, normalized into sorted merged ranges, and matched with binary search.
+
+## Performance Notes
+
+Short-term relay path improvements currently in tree:
+
+- `TCP_NODELAY` on local ingress, direct targets, backend ECH sockets, and server dial-out sockets.
+- Protobuf `bytes` fields generated as `Bytes`; tunnel relay uses `BytesMut` to avoid per-chunk `Vec` copies.
+- Larger data chunks (64 KiB) and deeper outbound queues (64) for bulk transfers.
+- China IP lookup is O(log n) after range merge, not linear scan.
+- ECHConfigList cached by DoH endpoint + name with DNS TTL; shared DoH HTTP client; cached BoringSSL `SslConnector` / trust store.
 
 ## Security Notes
 

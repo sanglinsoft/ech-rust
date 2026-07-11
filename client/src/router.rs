@@ -79,7 +79,7 @@ impl Router {
 }
 
 pub async fn connect_direct(connect_host: &str, target_port: u16) -> anyhow::Result<TcpStream> {
-    TcpStream::connect((connect_host, target_port))
-        .await
-        .map_err(Into::into)
+    let stream = TcpStream::connect((connect_host, target_port)).await?;
+    crate::tcp_util::configure_proxy_tcp(&stream);
+    Ok(stream)
 }

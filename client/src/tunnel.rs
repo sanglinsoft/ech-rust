@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use bytes::{Bytes, BytesMut};
 use futures_util::StreamExt;
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
@@ -14,10 +15,14 @@ use crate::{
         client_frame, server_frame, tunnel_service_client::TunnelServiceClient, ClientFrame,
         HalfClose, Open, Reset,
     },
+    tcp_util::configure_proxy_tcp,
 };
 
-const DATA_CHUNK_SIZE: usize = 32 * 1024;
-const OUTBOUND_QUEUE: usize = 32;
+/// Larger chunks amortize protobuf/HTTP2 framing for bulk transfers.
+const DATA_CHUNK_SIZE: usize = 64 * 1024;
+/// Deeper queue absorbs short bursts without stalling the reader as early.
+const OUTBOUND_QUEUE: usize = 64;
+const MAX_MESSAGE_SIZE: usize = DATA_CHUNK_SIZE * 2;
 
 pub async fn relay_grpc<S>(
     stream: S,
@@ -32,12 +37,16 @@ where
     let _permit = pool.acquire_stream_permit().await?;
     let channel = pool.pick();
     let mut client = TunnelServiceClient::new(channel)
-        .max_decoding_message_size(DATA_CHUNK_SIZE * 2)
-        .max_encoding_message_size(DATA_CHUNK_SIZE * 2);
+        .max_decoding_message_size(MAX_MESSAGE_SIZE)
+        .max_encoding_message_size(MAX_MESSAGE_SIZE);
 
     let (tx, rx) = mpsc::channel(OUTBOUND_QUEUE);
-    tx.send(open_frame(target_host, target_port, first_payload))
-        .await?;
+    tx.send(open_frame(
+        target_host,
+        target_port,
+        Bytes::from(first_payload),
+    ))
+    .await?;
 
     let token = format!("Bearer {}", pool.auth_token());
     let mut request = Request::new(ReceiverStream::new(rx));
@@ -65,19 +74,18 @@ where
     let tx_from_local = tx.clone();
 
     let local_to_grpc = tokio::spawn(async move {
-        let mut buf = vec![0_u8; DATA_CHUNK_SIZE];
+        let mut buf = BytesMut::with_capacity(DATA_CHUNK_SIZE);
         loop {
-            match local_reader.read(&mut buf).await {
+            buf.resize(DATA_CHUNK_SIZE, 0);
+            match local_reader.read(&mut buf[..]).await {
                 Ok(0) => {
                     let _ = tx_from_local.send(half_close_frame()).await;
                     return;
                 }
                 Ok(n) => {
-                    if tx_from_local
-                        .send(data_frame(buf[..n].to_vec()))
-                        .await
-                        .is_err()
-                    {
+                    buf.truncate(n);
+                    let data = buf.split().freeze();
+                    if tx_from_local.send(data_frame(data)).await.is_err() {
                         return;
                     }
                 }
@@ -124,6 +132,7 @@ pub async fn relay_direct<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
+    configure_proxy_tcp(&target);
     if !first_payload.is_empty() {
         target.write_all(&first_payload).await?;
     }
@@ -132,7 +141,7 @@ where
     Ok(())
 }
 
-fn open_frame(target_host: String, target_port: u16, first_payload: Vec<u8>) -> ClientFrame {
+fn open_frame(target_host: String, target_port: u16, first_payload: Bytes) -> ClientFrame {
     ClientFrame {
         payload: Some(client_frame::Payload::Open(Open {
             target_host,
@@ -142,7 +151,7 @@ fn open_frame(target_host: String, target_port: u16, first_payload: Vec<u8>) -> 
     }
 }
 
-fn data_frame(data: Vec<u8>) -> ClientFrame {
+fn data_frame(data: Bytes) -> ClientFrame {
     ClientFrame {
         payload: Some(client_frame::Payload::Data(data)),
     }

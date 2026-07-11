@@ -35,6 +35,7 @@ pub async fn serve(addr: String, auth: AuthStore, router: Arc<Router>) -> anyhow
 }
 
 async fn handle(mut stream: TcpStream, auth: AuthStore, router: Arc<Router>) -> anyhow::Result<()> {
+    crate::tcp_util::configure_proxy_tcp(&stream);
     let header = read_header(&mut stream).await?;
     let request = parse_request(&header)?;
     let user = match authenticate(&request, auth) {

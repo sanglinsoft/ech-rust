@@ -1,5 +1,6 @@
 use std::{net::SocketAddr, pin::Pin, sync::Arc, time::Duration};
 
+use bytes::{Bytes, BytesMut};
 use futures_core::Stream;
 use futures_util::StreamExt;
 use tokio::{
@@ -19,10 +20,11 @@ use crate::{
         client_frame, server_frame, tunnel_service_server::TunnelService, ClientFrame, HalfClose,
         OpenResult, Pong, Reset, ServerFrame,
     },
+    tcp_util::configure_proxy_tcp,
 };
 
-const DATA_CHUNK_SIZE: usize = 32 * 1024;
-const OUTBOUND_QUEUE: usize = 32;
+const DATA_CHUNK_SIZE: usize = 64 * 1024;
+const OUTBOUND_QUEUE: usize = 64;
 
 type ResponseStream = Pin<Box<dyn Stream<Item = Result<ServerFrame, Status>> + Send + 'static>>;
 
@@ -138,19 +140,18 @@ async fn handle_tunnel(
     let tx_from_target = tx.clone();
 
     let target_to_grpc = tokio::spawn(async move {
-        let mut buf = vec![0_u8; DATA_CHUNK_SIZE];
+        let mut buf = BytesMut::with_capacity(DATA_CHUNK_SIZE);
         loop {
-            match target_reader.read(&mut buf).await {
+            buf.resize(DATA_CHUNK_SIZE, 0);
+            match target_reader.read(&mut buf[..]).await {
                 Ok(0) => {
                     let _ = tx_from_target.send(Ok(server_half_close())).await;
                     return;
                 }
                 Ok(n) => {
-                    if tx_from_target
-                        .send(Ok(server_data(buf[..n].to_vec())))
-                        .await
-                        .is_err()
-                    {
+                    buf.truncate(n);
+                    let data = buf.split().freeze();
+                    if tx_from_target.send(Ok(server_data(data))).await.is_err() {
                         return;
                     }
                 }
@@ -233,6 +234,7 @@ async fn connect_any(policy: &Policy, addrs: &[SocketAddr]) -> Result<TcpStream,
     for addr in addrs {
         match time::timeout(policy.connect_timeout(), TcpStream::connect(addr)).await {
             Ok(Ok(stream)) => {
+                configure_proxy_tcp(&stream);
                 if let Ok(peer) = stream.peer_addr() {
                     policy.check_connected_addr(peer)?;
                 }
@@ -263,7 +265,7 @@ async fn send_reset(tx: &mpsc::Sender<Result<ServerFrame, Status>>, reason: &str
     let _ = tx.send(Ok(server_reset(reason.to_owned()))).await;
 }
 
-fn server_data(data: Vec<u8>) -> ServerFrame {
+fn server_data(data: Bytes) -> ServerFrame {
     ServerFrame {
         payload: Some(server_frame::Payload::Data(data)),
     }
